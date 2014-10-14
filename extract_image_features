@@ -1,0 +1,8 @@
+#!/bin/bash
+
+BOARD=1
+MODEL_FILE=CLS_net_20140801232522.pbtxt
+FEATURE_CONFIG_FILE=feature_config.pbtxt
+MEAN_FILE=../convnet/examples/imagenet/pixel_mean.h5
+
+extract_representation --board=$BOARD --model=$MODEL_FILE --feature-config=$FEATURE_CONFIG_FILE
