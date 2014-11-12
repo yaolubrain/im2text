@@ -29,8 +29,8 @@ def trainer(z, split=3500, pre_train=True):
         embed_map = None
 
     # Initialize the network
-    net = mlbl.MLBL(name='mlbl',
-                    loc='models/mlbl.pkl',
+    net = mlbl_word2vec.MLBL_WORD2VEC(name='mlbl_word2vec',
+                    loc='models/mlbl_word2vec.pkl',
                     seed=1234,
                     criteria='validation_pp',
                     k=5,
@@ -41,7 +41,7 @@ def trainer(z, split=3500, pre_train=True):
                     context=context,
                     batchsize=20,
                     maxepoch=100,
-                    eta_t=0.2,
+                    eta_t=0.02,
                     gamma_r=1e-4,
                     gamma_c=1e-5,
                     f=0.998,

@@ -1,7 +1,8 @@
 # numpy class for multimodal log-bilinear LM
 
 import numpy as np
-import gnumpy as gpu
+import theano
+import theano.tensor as T
 import sys
 from utils import stop
 from utils import lm_tools
@@ -9,21 +10,20 @@ from scipy.optimize import check_grad
 from scipy.sparse import vstack
 from numpy.random import RandomState
 import time
-gpu.max_memory_usage = 5454000000
 
 
-class MLBL(object):
+class MLBL_WORD2VEC(object):
     """
     Multimodal Log-bilinear language model trained using SGD
     """
     def __init__(self,
                  name='lbl',
-                 loc='models/mlbl.pkl',
+                 loc='models/mlbl_word2vec.pkl',
                  seed=1234,
                  criteria='validation_pp',
                  k=5,
                  V=1000,
-                 K=20,
+                 K=300,
                  D=4096,
                  h=256,
                  context=2,
@@ -95,36 +95,31 @@ class MLBL(object):
                 word = count_dict[i]
                 if word in embed_map:
                     R[:,i] = embed_map[word]
-                else:
-                    R[:,i] = embed_map['*UNKNOWN*']
-            R = gpu.garray(R)
+#                else:
+#                    R[:,i] = embed_map['*UNKNOWN*']
         else:
             r = np.sqrt(6) / np.sqrt(self.K + self.V + 1)
             R = prng.rand(self.K, self.V) * 2 * r - r
-            R = gpu.garray(R)
-        bw = gpu.zeros((1, self.V))
+
+        bw = np.zeros((1, self.V))
 
         # Context 
         C = 0.01 * prng.randn(self.context, self.K, self.K)
-        C = gpu.garray(C)
 
         # Image context
         M = 0.01 * prng.randn(self.h, self.K)
-        M = gpu.garray(M)
 
         # Hidden layer
         r = np.sqrt(6) / np.sqrt(self.D + self.h + 1)
         J = prng.rand(self.D, self.h) * 2 * r - r
-        J = gpu.garray(J)
-        bj = gpu.zeros((1, self.h))
+        bj = np.zeros((1, self.h))
 
-        # Initial deltas used for SGD
-        deltaR = gpu.zeros(np.shape(R))
-        deltaC = gpu.zeros(np.shape(C))
-        deltaB = gpu.zeros(np.shape(bw))
-        deltaM = gpu.zeros(np.shape(M))
-        deltaJ = gpu.zeros(np.shape(J))
-        deltaBj = gpu.zeros(np.shape(bj))
+        R = theano.shared(R.astype(theano.config.floatX), borrow=True)
+        C = theano.shared(C.astype(theano.config.floatX), borrow=True)
+        bw = theano.shared(bw.astype(theano.config.floatX), borrow=True)
+        M = theano.shared(M.astype(theano.config.floatX), borrow=True)
+        J = theano.shared(J.astype(theano.config.floatX), borrow=True)
+        bj = theano.shared(bj.astype(theano.config.floatX), borrow=True)
 
         self.R = R
         self.C = C
@@ -132,21 +127,13 @@ class MLBL(object):
         self.M = M
         self.J = J
         self.bj = bj
-        self.deltaR = deltaR
-        self.deltaC = deltaC
-        self.deltaB = deltaB
-        self.deltaM = deltaM
-        self.deltaJ = deltaJ
-        self.deltaBj = deltaBj
 
-
-    def forward(self, X, Im, test=False):
+    def forward(self, X, Im):
         """
         Feed-forward pass through the model
         X: ('batchsize' x 'context') matrix of word indices
         """
         batchsize = X.shape[0]
-        Im = gpu.garray(Im)
         R = self.R
         C = self.C
         M = self.M
@@ -155,32 +142,52 @@ class MLBL(object):
         bj = self.bj
 
         # Forwardprop images
-        Im = gpu.concatenate((Im, gpu.ones((batchsize, 1))), 1)
-        IF = gpu.dot(Im, gpu.concatenate((J, bj)))
+        Im = T.concatenate((Im, T.ones((batchsize, 1))), 1)
+        IF = T.dot(Im, T.concatenate((J, bj)))
         IF = IF * (IF > 0)
 
         # Obtain word features
-        tmp = R.as_numpy_array()[:,X.flatten()].flatten(order='F')
-        tmp = tmp.reshape((batchsize, self.K * self.context))
-        words = np.zeros((batchsize, self.K, self.context))
-        for i in range(batchsize):
-            words[i,:,:] = tmp[i,:].reshape((self.K, self.context), order='F')
-        words = gpu.garray(words)
+#        tmp = R.as_numpy_array()[:,X.flatten()].flatten(order='F')
+#        tmp = tmp.reshape((batchsize, self.K * self.context))
+#        words = np.zeros((batchsize, self.K, self.context))
+#        for i in range(batchsize):
+#            words[i,:,:] = tmp[i,:].reshape((self.K, self.context), order='F')
+#        words = gpu.garray(words)
 
+        words = R[:,X.flatten()].transpose().flatten().reshape((batchsize, self.context, self.K)).dimshuffle([0, 2, 1])
+         
         # Compute the hidden layer (predicted next word representation)
-        acts = gpu.zeros((batchsize, self.K))
-        for i in range(self.context):
-            acts = acts + gpu.dot(words[:,:,i], C[i,:,:])
-        acts = acts + gpu.dot(IF, M)
-        acts = gpu.concatenate((acts, gpu.ones((batchsize, 1))), 1)
+#        acts = gpu.zeros((batchsize, self.K))
+#        for i in range(self.context):
+#            acts = acts + gpu.dot(words[:,:,i], C[i,:,:])
+#        acts = acts + gpu.dot(IF, M)
+#        acts = gpu.concatenate((acts, gpu.ones((batchsize, 1))), 1)
+#        def oneMatMult(i, A, B):
+#            return T.dot(A[:,:,i], B[i,:,:])
 
-        # Compute softmax
-        preds = gpu.dot(acts, gpu.concatenate((R, bw)))
-        preds = gpu.exp(preds - preds.max(1).reshape(batchsize, 1))
-        denom = preds.sum(1).reshape(batchsize, 1)
-        preds = gpu.concatenate((preds / denom, gpu.ones((batchsize, 1))), 1)
+#        matMults, updates = theano.scan(fn=oneMatMult, sequences=T.arange(self.context), non_sequences=[words, C])
 
-        return (words, acts, IF, preds.as_numpy_array())
+        acts = T.dot(words[:,:,0], C[0,:,:]) \
+             + T.dot(words[:,:,1], C[1,:,:]) \
+             + T.dot(words[:,:,2], C[2,:,:]) \
+             + T.dot(words[:,:,3], C[3,:,:]) \
+             + T.dot(words[:,:,4], C[4,:,:])
+
+#        acts = matMults.sum()
+        acts = acts + T.dot(IF, M)
+        acts = T.concatenate((acts, T.ones((batchsize, 1))), 1)
+
+#        # Compute softmax
+#        preds = gpu.dot(acts, gpu.concatenate((R, bw)))
+#        preds = gpu.exp(preds - preds.max(1).reshape(batchsize, 1))
+#        denom = preds.sum(1).reshape(batchsize, 1)
+#        preds = gpu.concatenate((preds / denom, gpu.ones((batchsize, 1))), 1)
+        preds = T.dot(acts, T.concatenate((R, bw)))
+        preds = T.exp(preds - preds.max(1).reshape((batchsize, 1)))
+        denom = preds.sum(1, keepdims=True)
+        preds = T.concatenate((preds / denom, T.ones((batchsize, 1))), 1)
+
+        return (words, acts, IF, preds)
 
 
     def objective(self, Y, preds):
@@ -190,78 +197,43 @@ class MLBL(object):
         batchsize = Y.shape[0]
 
         # Cross-entropy
-        C = -np.sum(Y.multiply(np.log(preds[:,:-1] + 1e-20))) / batchsize
+#        C = -np.sum(Y.multiply(np.log(preds[:,:-1] + 1e-20))) / batchsize
+        C = -T.sum(T.mul(Y, (T.log(preds[:,:-1] + 1e-20)))) / batchsize
         return C
 
-
-    def backward(self, Y, preds, IF, acts, words, X, Im):
-        """
-        Backward pass through the network
-        """
-        batchsize = preds.shape[0]
-        Im = gpu.garray(Im)
-
-        # Compute part of df/dR
-        Ix = gpu.garray(preds[:,:-1] - Y) / batchsize
-        delta = gpu.dot(acts.T, Ix)
-        dR = delta[:-1,:] + self.gamma_r * self.R
-        db = delta[-1,:]
-        dR = dR.as_numpy_array()
-
-        # Compute df/dC and word inputs for df/dR
-        Ix = gpu.dot(Ix, self.R.T)
-        dC = gpu.zeros(np.shape(self.C))
-        for i in range(self.context):
-            delta = gpu.dot(words[:,:,i].T, Ix)
-            dC[i,:,:] = delta + self.gamma_c * self.C[i,:,:]
-            delta = gpu.dot(Ix, self.C[i,:,:].T)
-            delta = delta.as_numpy_array()
-            for j in range(X.shape[0]):
-                dR[:,X[j,i]] = dR[:,X[j,i]] + delta.T[:,j]
-
-        # Compute df/dM
-        dM = gpu.dot(IF.T, Ix) + self.gamma_c * self.M
-
-        # Compute df/dJ
-        Ix = gpu.dot(Ix, self.M.T) * (IF > 0)
-        Im = gpu.concatenate((Im, gpu.ones((batchsize, 1))), 1)
-        delta = gpu.dot(Im.T, Ix)
-        dJ = delta[:-1,:] + self.gamma_c * self.J
-        dBj = delta[-1,:]
-
-        self.dR = gpu.garray(dR)
-        self.dM = dM
-        self.db = db
-        self.dC = dC
-        self.dJ = dJ
-        self.dBj = dBj
-
-
-    def update_params(self, X):
+    def update_params(self, objective, X, lr, mom):
         """
         Update the network parameters using the computed gradients
         """
         batchsize = X.shape[0]
-        self.deltaC = self.p_t * self.deltaC - \
-            (1 - self.p_t) * (self.eta_t / batchsize) * self.dC
-        self.deltaR = self.p_t * self.deltaR - \
-            (1 - self.p_t) * (self.eta_t / batchsize) * self.dR
-        self.deltaB = self.p_t * self.deltaB - \
-            (1 - self.p_t) * (self.eta_t / batchsize) * self.db
-        self.deltaM = self.p_t * self.deltaM - \
-            (1 - self.p_t) * (self.eta_t / batchsize) * self.dM
-        self.deltaJ = self.p_t * self.deltaJ - \
-            (1 - self.p_t) * (self.eta_t / batchsize) * self.dJ
-        self.deltaBj = self.p_t * self.deltaBj - \
-            (1 - self.p_t) * (self.eta_t / batchsize) * self.dBj
+#        self.deltaC = self.p_t * self.deltaC - \
+#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dC
+#        self.deltaR = self.p_t * self.deltaR - \
+#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dR
+#        self.deltaB = self.p_t * self.deltaB - \
+#            (1 - self.p_t) * (self.eta_t / batchsize) * self.db
+#        self.deltaM = self.p_t * self.deltaM - \
+#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dM
+#        self.deltaJ = self.p_t * self.deltaJ - \
+#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dJ
+#        self.deltaBj = self.p_t * self.deltaBj - \
+#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dBj
+#        self.C = self.C + self.deltaC
+#        self.R = self.R + self.deltaR
+#        self.bw = self.bw + self.deltaB
+#        self.M = self.M + self.deltaM
+#        self.J = self.J + self.deltaJ
+#        self.bj = self.bj + self.deltaBj
 
-        self.C = self.C + self.deltaC
-        self.R = self.R + self.deltaR
-        self.bw = self.bw + self.deltaB
-        self.M = self.M + self.deltaM
-        self.J = self.J + self.deltaJ
-        self.bj = self.bj + self.deltaBj
+#        params = [self.R, self.C, self.bw, self.M, self.J, self.bj] 
+        params = [self.C, self.bw, self.M, self.J, self.bj] 
+        updates = []
+        for param in params:
+            delta = theano.shared(param.get_value()*0.)
+            updates.append((delta, mom * delta - ((1. - mom) * (lr / batchsize) * T.grad(objective, param)).astype(theano.config.floatX)))
+            updates.append((param, param + delta))
 
+        return updates
 
     def update_hyperparams(self):
         """
@@ -304,6 +276,17 @@ class MLBL(object):
         target=None
         num = 15000
 
+        x = T.matrix('x', dtype='int32')
+        y = T.matrix('y')
+        im = T.matrix('im')
+        lr = T.scalar('lr')
+        mom = T.scalar('mom')
+        (words, acts, IF, preds) = self.forward(x, im)
+        obj_T = self.compute_obj(x, im, y)
+        compute_obj_T = theano.function([x, im, y], obj_T)
+        train_batch = theano.function([x, im, y, lr, mom], obj_T, 
+                                      updates=self.update_params(obj_T, x, lr, mom), 
+                                      on_unused_input='warn')
         # Main loop
         stop.display_phase(1)
         for epoch in range(self.maxepoch):
@@ -311,24 +294,32 @@ class MLBL(object):
             tic = time.time()
             prng = RandomState(self.seed + epoch + 1)
             prng.shuffle(inds)
+            obj = 0.0
             for minibatch in range(numbatches):
+#            for minibatch in range(1):
+                batchX = X[inds[minibatch::numbatches]].astype(np.int32)
+                batchY = XY[inds[minibatch::numbatches]].toarray().astype(theano.config.floatX)
+                batchindX = indX[inds[minibatch::numbatches]].astype(np.int32).flatten()
+                batchIm = IM[batchindX].astype(theano.config.floatX)
+                
+                one_obj = train_batch(batchX, batchIm, batchY, self.eta_t, self.p_t)
+                obj += one_obj
 
-                batchX = X[inds[minibatch::numbatches]]
-                batchY = XY[inds[minibatch::numbatches]]
-                batchindX = indX[inds[minibatch::numbatches]].astype(int).flatten()
-                batchIm = IM[batchindX]
-            
-                (words, acts, IF, preds) = self.forward(batchX, batchIm)
-                self.backward(batchY, preds, IF, acts, words, batchX, batchIm)
-                self.update_params(batchX)
+                print self.C[0,0,0].eval(), self.bw[0,0].eval(), self.bj[0,0].eval(), self.J[0,0].eval(), self.M[0,0].eval()
 
             self.update_hyperparams()
+
             toc = time.time()
-
             # Results and stopping criteria
-            obj = self.compute_obj(X[:num], IM[indX[:num].astype(int).flatten()], XY[:num])
-            obj_val = self.compute_obj(V[:num], IM[indV[:num].astype(int).flatten()], VY[:num])
+#            obj_train = compute_obj_T(X[:num].astype(np.int32), 
+#                              IM[indX[:num].astype(int).flatten()].astype(theano.config.floatX), 
+#                              XY[:num].toarray().astype(theano.config.floatX))
+            obj_val = compute_obj_T(V[:num].astype(np.int32), 
+                                  IM[indV[:num].astype(int).flatten()].astype(theano.config.floatX), 
+                                  VY[:num].toarray().astype(theano.config.floatX))
 
+            stop.display_results(epoch, toc-tic, obj, obj_val)
+'''            
             if self.verbose > 0:
                 stop.display_results(epoch, toc-tic, obj, obj_val)
             (curr, counter) = stop.update_result(curr, obj_val, counter)
@@ -341,7 +332,8 @@ class MLBL(object):
                 if self.criteria == 'maxepoch':
                     break
                 elif self.criteria == 'validation_pp':
-                    self = stop.load_model(self.loc)
+#                    self = stop.load_model(self.loc)
+
                     counter = 0
                     X = np.r_[X, V]
                     XY = vstack([XY, VY]).tocsr()
@@ -354,7 +346,7 @@ class MLBL(object):
                     numbatches = len(inds) / self.batchsize
                 elif self.criteria == 'll_train_heldout':
                     break
-          
+'''          
       
 def main():
     pass
