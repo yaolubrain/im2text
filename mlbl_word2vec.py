@@ -147,25 +147,13 @@ class MLBL_WORD2VEC(object):
         IF = IF * (IF > 0)
 
         # Obtain word features
-#        tmp = R.as_numpy_array()[:,X.flatten()].flatten(order='F')
-#        tmp = tmp.reshape((batchsize, self.K * self.context))
-#        words = np.zeros((batchsize, self.K, self.context))
-#        for i in range(batchsize):
-#            words[i,:,:] = tmp[i,:].reshape((self.K, self.context), order='F')
-#        words = gpu.garray(words)
-
         words = R[:,X.flatten()].transpose().flatten().reshape((batchsize, self.context, self.K)).dimshuffle([0, 2, 1])
          
         # Compute the hidden layer (predicted next word representation)
-#        acts = gpu.zeros((batchsize, self.K))
-#        for i in range(self.context):
-#            acts = acts + gpu.dot(words[:,:,i], C[i,:,:])
-#        acts = acts + gpu.dot(IF, M)
-#        acts = gpu.concatenate((acts, gpu.ones((batchsize, 1))), 1)
 #        def oneMatMult(i, A, B):
 #            return T.dot(A[:,:,i], B[i,:,:])
-
 #        matMults, updates = theano.scan(fn=oneMatMult, sequences=T.arange(self.context), non_sequences=[words, C])
+#        acts = matMults.sum()
 
         acts = T.dot(words[:,:,0], C[0,:,:]) \
              + T.dot(words[:,:,1], C[1,:,:]) \
@@ -173,15 +161,10 @@ class MLBL_WORD2VEC(object):
              + T.dot(words[:,:,3], C[3,:,:]) \
              + T.dot(words[:,:,4], C[4,:,:])
 
-#        acts = matMults.sum()
         acts = acts + T.dot(IF, M)
         acts = T.concatenate((acts, T.ones((batchsize, 1))), 1)
 
 #        # Compute softmax
-#        preds = gpu.dot(acts, gpu.concatenate((R, bw)))
-#        preds = gpu.exp(preds - preds.max(1).reshape(batchsize, 1))
-#        denom = preds.sum(1).reshape(batchsize, 1)
-#        preds = gpu.concatenate((preds / denom, gpu.ones((batchsize, 1))), 1)
         preds = T.dot(acts, T.concatenate((R, bw)))
         preds = T.exp(preds - preds.max(1).reshape((batchsize, 1)))
         denom = preds.sum(1, keepdims=True)
@@ -197,7 +180,6 @@ class MLBL_WORD2VEC(object):
         batchsize = Y.shape[0]
 
         # Cross-entropy
-#        C = -np.sum(Y.multiply(np.log(preds[:,:-1] + 1e-20))) / batchsize
         C = -T.sum(T.mul(Y, (T.log(preds[:,:-1] + 1e-20)))) / batchsize
         return C
 
@@ -206,30 +188,12 @@ class MLBL_WORD2VEC(object):
         Update the network parameters using the computed gradients
         """
         batchsize = X.shape[0]
-#        self.deltaC = self.p_t * self.deltaC - \
-#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dC
-#        self.deltaR = self.p_t * self.deltaR - \
-#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dR
-#        self.deltaB = self.p_t * self.deltaB - \
-#            (1 - self.p_t) * (self.eta_t / batchsize) * self.db
-#        self.deltaM = self.p_t * self.deltaM - \
-#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dM
-#        self.deltaJ = self.p_t * self.deltaJ - \
-#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dJ
-#        self.deltaBj = self.p_t * self.deltaBj - \
-#            (1 - self.p_t) * (self.eta_t / batchsize) * self.dBj
-#        self.C = self.C + self.deltaC
-#        self.R = self.R + self.deltaR
-#        self.bw = self.bw + self.deltaB
-#        self.M = self.M + self.deltaM
-#        self.J = self.J + self.deltaJ
-#        self.bj = self.bj + self.deltaBj
 
 #        params = [self.R, self.C, self.bw, self.M, self.J, self.bj] 
         params = [self.C, self.bw, self.M, self.J, self.bj] 
         updates = []
         for param in params:
-            delta = theano.shared(param.get_value()*0.)
+            delta = theano.shared(param.get_value()*0., borrow=True)
             updates.append((delta, mom * delta - ((1. - mom) * (lr / batchsize) * T.grad(objective, param)).astype(theano.config.floatX)))
             updates.append((param, param + delta))
 
@@ -256,11 +220,37 @@ class MLBL_WORD2VEC(object):
         return obj
 
 
-    def compute_pp(self, Xp, Im, word_dict):
+    def compute_ll(self, instances, Im, forward_T):
         """
-        Compute the model perplexity
+        Compute the log-likelihood of instances from net
         """
-        return lm_tools.perplexity(self, Xp, word_dict, Im, self.context)
+        if Im != None:
+            preds = forward_T(instances[:,:-1], Im)[-1]
+        else:
+            preds = self.forward(instances[:,:-1])[-1]
+        ll = 0
+        for i in range(preds.shape[0]):
+            ll += np.log2(preds[i, instances[i, -1]] + 1e-20)
+        return ll
+ 
+
+    def perplexity(self, ngrams, word_dict, Im=None, context=5):
+        """
+        Compute the perplexity of ngrams from net
+        """
+        ll = 0
+        N = 0
+        x = T.matrix('x', dtype='int32')
+        im = T.matrix('im')
+        forward_T = theano.function([x, im], self.forward(x, im))
+        for i, ng in enumerate(ngrams):
+            instances = lm_tools.model_inputs([ng], word_dict)
+            if Im != None:
+                ll += self.compute_ll(instances.astype(np.int32), np.tile(Im[i], (len(ng), 1)).astype(theano.config.floatX), forward_T)
+            else:
+                ll += self.compute_ll(instances)
+            N += len(instances)
+        return np.power(2, (-1.0 / N) * ll)
 
 
     def train(self, X, indX, XY, V, indV, VY, IM, count_dict, word_dict, embed_map):
@@ -287,6 +277,9 @@ class MLBL_WORD2VEC(object):
         train_batch = theano.function([x, im, y, lr, mom], obj_T, 
                                       updates=self.update_params(obj_T, x, lr, mom), 
                                       on_unused_input='warn')
+
+        log_file = open("train_valid_err.txt", 'w')
+
         # Main loop
         stop.display_phase(1)
         for epoch in range(self.maxepoch):
@@ -296,35 +289,28 @@ class MLBL_WORD2VEC(object):
             prng.shuffle(inds)
             obj = 0.0
             for minibatch in range(numbatches):
-#            for minibatch in range(1):
                 batchX = X[inds[minibatch::numbatches]].astype(np.int32)
                 batchY = XY[inds[minibatch::numbatches]].toarray().astype(theano.config.floatX)
                 batchindX = indX[inds[minibatch::numbatches]].astype(np.int32).flatten()
                 batchIm = IM[batchindX].astype(theano.config.floatX)
                 
-                one_obj = train_batch(batchX, batchIm, batchY, self.eta_t, self.p_t)
-                obj += one_obj
-
-                print self.C[0,0,0].eval(), self.bw[0,0].eval(), self.bj[0,0].eval(), self.J[0,0].eval(), self.M[0,0].eval()
+                obj += train_batch(batchX, batchIm, batchY, self.eta_t, self.p_t)
 
             self.update_hyperparams()
 
             toc = time.time()
             # Results and stopping criteria
-#            obj_train = compute_obj_T(X[:num].astype(np.int32), 
-#                              IM[indX[:num].astype(int).flatten()].astype(theano.config.floatX), 
-#                              XY[:num].toarray().astype(theano.config.floatX))
             obj_val = compute_obj_T(V[:num].astype(np.int32), 
                                   IM[indV[:num].astype(int).flatten()].astype(theano.config.floatX), 
                                   VY[:num].toarray().astype(theano.config.floatX))
 
-            stop.display_results(epoch, toc-tic, obj, obj_val)
-'''            
+            log_file.write('{} {}\n'.format(obj, obj_val))
+
             if self.verbose > 0:
                 stop.display_results(epoch, toc-tic, obj, obj_val)
             (curr, counter) = stop.update_result(curr, obj_val, counter)
             if counter == 0:
-                stop.save_model(self, self.loc)
+                stop.save_model_theano(self, self.loc)
                 stopping_target = obj
 
             if stop.criteria_complete(self, epoch, curr, obj, counter, 
@@ -332,7 +318,7 @@ class MLBL_WORD2VEC(object):
                 if self.criteria == 'maxepoch':
                     break
                 elif self.criteria == 'validation_pp':
-#                    self = stop.load_model(self.loc)
+                    stop.load_model_theano(self, self.loc)
 
                     counter = 0
                     X = np.r_[X, V]
@@ -346,8 +332,19 @@ class MLBL_WORD2VEC(object):
                     numbatches = len(inds) / self.batchsize
                 elif self.criteria == 'll_train_heldout':
                     break
-'''          
-      
+
+        log_file.close()
+        
+    def eval_pp(self, z, zt):
+        if self.name != 'lbl':
+            Im = zt['IM']
+        else:
+            Im = None
+
+        pp = self.perplexity(zt['ngrams'], z['word_dict'], Im=Im, context=self.context)
+        print 'PERPLEXITY: ' + str(pp)
+
+
 def main():
     pass
 
